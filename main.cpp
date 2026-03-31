@@ -1,631 +1,512 @@
+
+/*
+#include <Arduino.h>
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include <Wire.h>
+#include <driver/i2s.h>
+#include "Audio.h"
+#include "TAS5749M_I2C.h"
+
+
+
+const char* ssid     = "Linksys19102";
+const char* password = "lzcrcm7fas";
+
+
+
+
+
+#define I2S_BCLK   26
+#define I2S_LRCLK  25
+#define I2S_DATA   27   // 🔴 FIXED
+#define I2S_MCLK   3
+
+
+
+#define SDA_PIN   21
+#define SCL_PIN   22
+
+
+
+Audio audio;
+WebServer server(80);
+Preferences prefs;
+
+
+struct Station {
+  const char* name;
+  const char* url;
+};
+
+Station stations[] = {
+  {"BBC Radio 4", "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_fourlw"},
+  {"BBC World",  "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"},
+  {"NPR",        "https://npr-ice.streamguys1.com/live.mp3"},
+  {"Jazz24",     "https://live.wostreaming.net/direct/ppm-jazz24mp3-ibc1"}
+};
+
+const int stationCount = sizeof(stations) / sizeof(stations[0]);
+int currentStation = 0;
+int currentVolume  = 50;
+
+
+
+void setupI2S() {
+  i2s_config_t cfg = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = 48000,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 256,
+    .use_apll = true,
+    .tx_desc_auto_clear = true,
+    .fixed_mclk = 3072000   // 🔴 64 × 48kHz
+  };
+
+  i2s_pin_config_t pins = {
+  .mck_io_num = I2S_MCLK,
+  .bck_io_num = I2S_BCLK,
+  .ws_io_num = I2S_LRCLK,
+  .data_out_num = I2S_DATA,
+  .data_in_num = I2S_PIN_NO_CHANGE,
+  
+};
+
+
+  i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL);
+  i2s_set_pin(I2S_NUM_0, &pins);
+
+  Serial.println("I2S started:");
+  Serial.println("  BCLK = GPIO26");
+  Serial.println("  LRCLK = GPIO25");
+  Serial.println("  DATA = GPIO27");
+  Serial.println("  MCLK = GPIO3");
+  //Serial.println("  MCLK = GPIO3 (3.072 MHz)");
+
+}
+
+
+
+
+// ---- Audio debug callbacks ----
+
+void audio_info(const char *info) {
+  Serial.print("INFO: ");
+  Serial.println(info);
+}
+
+void audio_showstation(const char *info) {
+  Serial.print("STATION: ");
+  Serial.println(info);
+}
+
+void audio_showstreamtitle(const char *info) {
+  Serial.print("NOW PLAYING: ");
+  Serial.println(info);
+}
+
+void audio_bitrate(const char *info) {
+  Serial.print("BITRATE: ");
+  Serial.println(info);
+}
+
+void audio_error(const char *info) {
+  Serial.print("ERROR: ");
+  Serial.println(info);
+}
+
+
+
+//////////////////////////////////////////////
+
+
+
+
+void I2C_SCAN(){
+byte error;
+  int found = 0;
+
+  Serial.println();
+  Serial.println("Scanning...");
+
+  for (uint8_t address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+
+    if (error == 0) {
+      Serial.print("I2C device found at 0x");
+      if (address < 16) Serial.print("0");
+      Serial.println(address, HEX);
+      found++;
+    } else if (error == 4) {
+      Serial.print("Unknown error at 0x");
+      if (address < 16) Serial.print("0");
+      Serial.println(address, HEX);
+    }
+  }
+
+  if (found == 0) {
+    Serial.println("No I2C devices found");
+  } else {
+    Serial.print("Done. Found ");
+    Serial.print(found);
+    Serial.println(" device(s).");
+  }
+
+  delay(3000);
+}
+
+
+
+
+
+void setup() {
+
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\nESP32 Internet Radio starting...");
+
+
+    Serial.print("Connecting to WiFi: ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi connected!");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+ delay(20);
+
+
+Wire.begin(SDA_PIN, SCL_PIN);
+ 
+  delay(20);
+  I2C_SCAN();
+  delay(20);
+TAS5749_I2C_INT();
+
+ // Force I2S clocking
+ 
+  i2s_set_clk(
+    I2S_NUM_0,
+    48000,                 // sample rate
+    I2S_BITS_PER_SAMPLE_32BIT,
+    //I2S_CHANNEL_STEREO
+     I2S_CHANNEL_MONO 
+  );
+  
+ // Audio library
+ audio.setPinout(I2S_BCLK, I2S_LRCLK, I2S_DATA);
+  //audio.i2s_mclk_pin_select(I2S_MCLK);
+  audio.setVolume(currentVolume);
+ audio.connecttohost("http://vis.media-ice.musicradio.com/CapitalMP3");//("http://vis.media-ice.musicradio.com/CapitalMP3");//("http://stream.live.vc.bbcmedia.co.uk/bbc_world_service");//
+
+}
+
+
+
+void loop() {
+  audio.loop();
+
+ 
+}
+*/
+
+
+
+
+
+
+
+
+
+
+
+//////////////////////////////////////////////
+////////////////////////////////////////////////
+
+
 #include <Arduino.h>
 #include <Wire.h>
-#include <string.h>
-#include "i2s_mck.h"
-#include "TA_SA100WR_I2C_SNIFING_seq_from_pulseview.h"
+#include <driver/i2s.h>
+#include "TAS5749M_I2C.h"
 
 // ============================================================
 // USER PINS
 // ============================================================
-static const int I2C_SDA = 21;
-static const int I2C_SCL = 22;
-static const uint32_t I2C_HZ = 100000;
 
-static const int PIN_RESN        = 4;   // ESP32 -> EZW-RT10A reset (active low)
-static const int GPIO1_ASIC_LINK = 34;  // EZW-RT10A -> ESP32 LINK
-static const int GPIO2_ASIC_INT  = 35;  // EZW-RT10A -> ESP32 INT
+// -------- Sony I2S input (ESP32 reads Sony) --------
+#define SONY_BCK_IN    32
+#define SONY_WS_IN     33
+#define SONY_DATA_IN   34   // input-only pin is okay here
 
-// ============================================================
-// TIMING
-// ============================================================
-static const uint32_t POLL_PERIOD_MS    = 20;
-static const uint8_t  BURST_POLLS       = 3;
-static const uint16_t BURST_DELAY_MS    = 2;
-static const uint32_t KEEPALIVE_MS      = 250;
-static const uint32_t REPAIR_INTERVALMS = 3000;
+// -------- TAS I2S output (ESP32 drives Samsung amp) --------
+#define TAS_BCK_OUT    26
+#define TAS_WS_OUT     25
+#define TAS_DATA_OUT   27
+
+// -------- TAS I2C --------
+#define SDA_PIN        21
+#define SCL_PIN        22
 
 // ============================================================
-// GLOBAL STATE
+// I2S PORTS
 // ============================================================
-struct PollDef {
-  uint8_t ptr;
-  uint8_t len;
-  const char* name;
-};
 
-static const PollDef pollList[] = {
-  { 0x13, 2,  "reg13" },
-  { 0x41, 2,  "reg41" },
-  { 0x50, 17, "reg50" },
-  { 0x74, 2,  "reg74" },
-  { 0x76, 2,  "reg76" },
-};
+static const i2s_port_t I2S_SONY_RX = I2S_NUM_0;
+static const i2s_port_t I2S_TAS_TX  = I2S_NUM_1;
 
-struct PollCache {
-  bool valid;
-  uint8_t data[17];
-};
+// ============================================================
+// AUDIO FORMAT
+// ============================================================
 
-static PollCache lastPoll[sizeof(pollList) / sizeof(pollList[0])];
+// Sony side you observed at ~48 kHz and ~3.072 MHz BCK,
+// which matches 32-bit stereo slots at 48 kHz.
+static const uint32_t SONY_FS = 48000;
 
-static bool linkedOnce = false;
-static bool autoKeepAlive = true;
-static uint32_t lastKeepAliveMs = 0;
-static uint32_t lastRepairMs = 0;
+// TAS side already works for you only when forced to
+// 48 kHz / 32-bit / MONO. 
+static const uint32_t TAS_FS = 48000;
+
+// ============================================================
+// BUFFERING
+// ============================================================
+
+static const size_t RX_SAMPLES_STEREO = 256;  // number of int32 stereo words, not frames
+static int32_t rxBuf[RX_SAMPLES_STEREO];      // interleaved L,R,L,R...
+static int32_t txBuf[RX_SAMPLES_STEREO / 2];  // mono samples
+
+// ============================================================
+// OPTIONAL TUNING
+// ============================================================
+
+// If channels are swapped or polarity sounds weird, tweak these.
+static bool useLeftOnly   = false;
+static bool useRightOnly  = false;
+static bool averageLR     = true;
+
+// If audio sounds distorted or too loud, attenuate after mixing.
+static int outputShift = 1;   // 1 = divide by 2, 2 = divide by 4, 0 = no shift
 
 // ============================================================
 // HELPERS
 // ============================================================
-static void printHex2(uint8_t b) {
-  if (b < 0x10) Serial.print('0');
-  Serial.print(b, HEX);
+
+static inline int32_t sat_add32(int32_t a, int32_t b) {
+  int64_t s = (int64_t)a + (int64_t)b;
+  if (s >  2147483647LL) return  2147483647;
+  if (s < -2147483648LL) return -2147483648LL;
+  return (int32_t)s;
 }
 
-static void dumpBytes(const uint8_t* p, size_t n) {
-  for (size_t i = 0; i < n; i++) {
-    printHex2(p[i]);
-    if (i + 1 < n) Serial.print(' ');
-  }
-}
-
-static void printStamp() {
-  Serial.print("[");
-  Serial.print(millis());
-  Serial.print(" ms] ");
-}
-
-static void print_link_status() {
-  Serial.print("LINK=");
-  Serial.println(digitalRead(GPIO1_ASIC_LINK) ? "HIGH" : "LOW");
-}
-
-static void print_int_status() {
-  Serial.print("INT=");
-  Serial.println(digitalRead(GPIO2_ASIC_INT) ? "HIGH" : "LOW");
-}
-
-static void ezw_reset_pulse() {
-  digitalWrite(PIN_RESN, LOW);
-  delay(30);
-  digitalWrite(PIN_RESN, HIGH);
-  delay(200);
+static void print_i2s_rates() {
+  Serial.println("Expected formats:");
+  Serial.println("  Sony RX : 48k, 32-bit stereo, slave");
+  Serial.println("  TAS  TX : 48k, 32-bit mono, master");
+  Serial.println("Expected clocks:");
+  Serial.println("  Sony BCK should be around 3.072 MHz");
+  Serial.println("  Sony LRCK should be 48 kHz");
+  Serial.println("  TAS  BCK should be around 1.536 MHz");
+  Serial.println("  TAS  LRCK should be 48 kHz");
 }
 
 // ============================================================
-// I2C
+// I2S INIT
 // ============================================================
-static bool i2cWrite(uint8_t addr7, const uint8_t* data, size_t len) {
-  Wire.beginTransmission(addr7);
-  Wire.write(data, len);
-  uint8_t rc = Wire.endTransmission(true);
 
-  if (rc != 0) {
-    printStamp();
-    Serial.print("I2C WRITE FAIL addr=0x");
-    Serial.print(addr7, HEX);
-    Serial.print(" rc=");
-    Serial.println(rc);
-    return false;
-  }
-  return true;
+static void init_sony_rx() {
+  // Sony provides clocks -> ESP32 is slave RX
+  i2s_config_t cfg = {};
+  cfg.mode = (i2s_mode_t)(I2S_MODE_SLAVE | I2S_MODE_RX);
+  cfg.sample_rate = SONY_FS;
+  cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
+  cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+  cfg.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB);
+  cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+  cfg.dma_buf_count = 8;
+  cfg.dma_buf_len = 128;
+  cfg.use_apll = false;
+  cfg.tx_desc_auto_clear = false;
+  cfg.fixed_mclk = 0;
+
+  i2s_pin_config_t pins = {};
+  pins.bck_io_num   = SONY_BCK_IN;
+  pins.ws_io_num    = SONY_WS_IN;
+  pins.data_out_num = I2S_PIN_NO_CHANGE;
+  pins.data_in_num  = SONY_DATA_IN;
+#if ESP_IDF_VERSION_MAJOR >= 4
+  pins.mck_io_num   = I2S_PIN_NO_CHANGE;
+#endif
+
+  i2s_driver_install(I2S_SONY_RX, &cfg, 0, NULL);
+  i2s_set_pin(I2S_SONY_RX, &pins);
+  i2s_zero_dma_buffer(I2S_SONY_RX);
+
+  Serial.println("Sony RX I2S ready");
 }
 
-static bool i2cRead(uint8_t addr7, uint8_t* out, size_t len) {
-  size_t got = Wire.requestFrom((int)addr7, (int)len, (int)true);
-  for (size_t i = 0; i < got; i++) out[i] = Wire.read();
+static void init_tas_tx() {
+  // ESP32 generates TAS clocks -> master TX
+  i2s_config_t cfg = {};
+  cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+  cfg.sample_rate = TAS_FS;
+  cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
 
-  if (got != len) {
-    printStamp();
-    Serial.print("I2C READ SHORT addr=0x");
-    Serial.print(addr7, HEX);
-    Serial.print(" got=");
-    Serial.print(got);
-    Serial.print(" expected=");
-    Serial.println(len);
-    return false;
-  }
-  return true;
-}
+  // Start as stereo/right-left, then force MONO with i2s_set_clk
+  // because that is the mode you found actually works on TAS5749M. 
+  cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;//I2S_CHANNEL_FMT_ONLY_RIGHT;
+  cfg.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB);
+  cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+  cfg.dma_buf_count = 8;
+  cfg.dma_buf_len = 128;
+  cfg.use_apll = true;
+  cfg.tx_desc_auto_clear = true;
+  cfg.fixed_mclk = 0;
 
-static bool ptrRead40(uint8_t ptr, uint8_t* out, size_t len) {
-  if (!i2cWrite(ADDR_40, &ptr, 1)) return false;
-  return i2cRead(ADDR_40, out, len);
-}
+  i2s_pin_config_t pins = {};
+  pins.bck_io_num   = TAS_BCK_OUT;
+  pins.ws_io_num    = TAS_WS_OUT;
+  pins.data_out_num = TAS_DATA_OUT;
+  pins.data_in_num  = I2S_PIN_NO_CHANGE;
+#if ESP_IDF_VERSION_MAJOR >= 4
+  pins.mck_io_num   = I2S_PIN_NO_CHANGE;
+#endif
 
-// ============================================================
-// POLL / DIFF LOGGING
-// ============================================================
-static void printChangedBlock(const char* name, uint8_t ptr, const uint8_t* data, size_t len) {
-  printStamp();
-  Serial.print(name);
-  Serial.print(" ptr=0x");
-  printHex2(ptr);
-  Serial.print(" -> ");
-  dumpBytes(data, len);
-  Serial.println();
-}
+  i2s_driver_install(I2S_TAS_TX, &cfg, 0, NULL);
+  i2s_set_pin(I2S_TAS_TX, &pins);
+  i2s_zero_dma_buffer(I2S_TAS_TX);
 
-static void printDiff50(const uint8_t* oldb, const uint8_t* newb, size_t len) {
-  printStamp();
-  Serial.print("reg50 diff: ");
-  bool any = false;
+  // This is the key: match the TAS mode you already proved works
+  i2s_set_clk(
+    I2S_TAS_TX,
+    48000,
+    I2S_BITS_PER_SAMPLE_32BIT,
+    I2S_CHANNEL_MONO
+  );
 
-  for (size_t i = 0; i < len; i++) {
-    if (oldb[i] != newb[i]) {
-      any = true;
-      Serial.print("[");
-      Serial.print(i);
-      Serial.print("]=");
-      printHex2(oldb[i]);
-      Serial.print("->");
-      printHex2(newb[i]);
-      Serial.print(" ");
-    }
-  }
-
-  if (!any) Serial.print("no change");
-  Serial.println();
-}
-
-static void poll_once(bool printAll) {
-  uint8_t buf[17];
-
-  for (size_t i = 0; i < sizeof(pollList) / sizeof(pollList[0]); i++) {
-    const PollDef& p = pollList[i];
-
-    if (!ptrRead40(p.ptr, buf, p.len)) {
-      printStamp();
-      Serial.print("poll fail ptr=0x");
-      printHex2(p.ptr);
-      Serial.println();
-      continue;
-    }
-
-    bool changed = !lastPoll[i].valid || (memcmp(lastPoll[i].data, buf, p.len) != 0);
-
-    if (printAll || changed) {
-      if (p.ptr == 0x50 && lastPoll[i].valid && !printAll) {
-        printDiff50(lastPoll[i].data, buf, p.len);
-      } else {
-        printChangedBlock(p.name, p.ptr, buf, p.len);
-      }
-    }
-
-    memcpy(lastPoll[i].data, buf, p.len);
-    lastPoll[i].valid = true;
-  }
-}
-
-static void poll_burst(uint8_t n, uint16_t dlyMs) {
-  for (uint8_t i = 0; i < n; i++) {
-    poll_once(false);
-    delay(dlyMs);
-  }
+  Serial.println("TAS TX I2S ready");
 }
 
 // ============================================================
-// SMART SNIFF EXECUTION
+// CONVERSION
 // ============================================================
 
-// Your sniff file has many single-byte pointer writes such as
-// 0x13 / 0x41 / 0x50 / 0x74 / 0x76, and also many 17-byte blocks
-// beginning with 0x50. Those 17-byte blocks look like captured readback
-// payloads from the sniff, not something we should blindly write back.
-// So:
-//   - single-byte known ptr -> perform read
-//   - 17-byte 0x50... block -> skip
-//   - everything else -> normal write
-
-static bool isPollPtr40(uint8_t ptr) {
-  return (ptr == 0x13 || ptr == 0x41 || ptr == 0x50 || ptr == 0x74 || ptr == 0x76);
-}
-
-static size_t pollLen40(uint8_t ptr) {
-  if (ptr == 0x50) return 17;
-  return 2;
-}
-
-static bool doPtrRead40(uint8_t ptr, bool verbose = true) {
-  uint8_t buf[17] = {0};
-
-  if (!i2cWrite(ADDR_40, &ptr, 1)) {
-    if (verbose) {
-      printStamp();
-      Serial.print("PTR WRITE FAIL 0x");
-      printHex2(ptr);
-      Serial.println();
-    }
-    return false;
-  }
-
-  size_t len = pollLen40(ptr);
-  if (!i2cRead(ADDR_40, buf, len)) {
-    if (verbose) {
-      printStamp();
-      Serial.print("PTR READ FAIL 0x");
-      printHex2(ptr);
-      Serial.println();
-    }
-    return false;
-  }
-
-  if (verbose) {
-    printStamp();
-    Serial.print("READ 0x40 ptr=0x");
-    printHex2(ptr);
-    Serial.print(" -> ");
-    dumpBytes(buf, len);
-    Serial.println();
-  }
-
-  return true;
-}
-
-static bool looksLikeCapturedReadback(const Cmd& c) {
-  if (c.addr != ADDR_40) return false;
-  if (c.len == 17 && c.data[0] == 0x50) return true;
-  return false;
-}
-
-static void printFrame(const Cmd& c, size_t index) {
-  printStamp();
-  Serial.print("#");
-  Serial.print(index);
-  Serial.print(" W 0x");
-  printHex2(c.addr);
-  Serial.print(": ");
-  dumpBytes(c.data, c.len);
-  Serial.println();
-}
-
-static bool execute_sniff_cmd(const Cmd& c, size_t index, bool verbose = true) {
-  if (verbose) {
-    printFrame(c, index);
-  }
-
-  if (looksLikeCapturedReadback(c)) {
-    if (verbose) {
-      printStamp();
-      Serial.println("skip captured 0x50 status/readback block");
-    }
-    return true;
-  }
-
-  if (c.addr == ADDR_40 && c.len == 1 && isPollPtr40(c.data[0])) {
-    return doPtrRead40(c.data[0], verbose);
-  }
-
-  if (!i2cWrite(c.addr, c.data, c.len)) {
-    printStamp();
-    Serial.print("EXEC FAIL at index ");
-    Serial.println(index);
-    return false;
-  }
-
-  delay(2);
-  return true;
-}
-
-static bool run_full_sequence_from_file() {
-  printStamp();
-  Serial.println("---- FULL SEQ START ----");
-
-  for (size_t i = 0; i < seq_from_pulseview_count; i++) {
-    if (!execute_sniff_cmd(seq_from_pulseview[i], i, true)) {
-      printStamp();
-      Serial.print("FULL SEQ FAILED at index ");
-      Serial.println(i);
-      return false;
-    }
-  }
-
-  printStamp();
-  Serial.println("---- FULL SEQ DONE ----");
-  return true;
-}
-
-// ============================================================
-// SMART PAIRING
-// ============================================================
-
-// Based on your newer sniff:
-//   10 85
-//   74
-//   13
-//   46 00
-//   50 / 41 / 13 repeated
-// and later 76 appears too.
+// Sony RX buffer is interleaved stereo 32-bit:
+//   rx[0]=L0, rx[1]=R0, rx[2]=L1, rx[3]=R1, ...
 //
-// So we do a smart wake phase using the same rhythm.
+// TAS TX wants mono 32-bit stream.
+// We can feed one mono sample at a time.
+static size_t stereo32_to_mono32(const int32_t* in, size_t inWords, int32_t* out) {
+  size_t frames = inWords / 2;
 
-static bool send_10_85_wake() {
-  const uint8_t d1[] = {0x10, 0x85};
-  const uint8_t d2[] = {0x46, 0x00};
+  for (size_t i = 0; i < frames; i++) {
+    int32_t L = in[2 * i + 0];
+    int32_t R = in[2 * i + 1];
+    int32_t M = 0;
 
-  printStamp();
-  Serial.println("WAKE: send 10 85");
-  if (!i2cWrite(ADDR_40, d1, sizeof(d1))) return false;
-  delay(2);
-
-  printStamp();
-  Serial.println("WAKE: poll 74");
-  if (!doPtrRead40(0x74, true)) return false;
-  delay(2);
-
-  printStamp();
-  Serial.println("WAKE: poll 13");
-  if (!doPtrRead40(0x13, true)) return false;
-  delay(2);
-
-  printStamp();
-  Serial.println("WAKE: send 46 00");
-  if (!i2cWrite(ADDR_40, d2, sizeof(d2))) return false;
-  delay(2);
-
-  printStamp();
-  Serial.println("WAKE: poll 50");
-  if (!doPtrRead40(0x50, true)) return false;
-  delay(2);
-
-  printStamp();
-  Serial.println("WAKE: poll 41");
-  if (!doPtrRead40(0x41, true)) return false;
-  delay(2);
-
-  printStamp();
-  Serial.println("WAKE: poll 13");
-  if (!doPtrRead40(0x13, true)) return false;
-  delay(2);
-
-  printStamp();
-  Serial.println("WAKE: poll 76");
-  doPtrRead40(0x76, true); // optional, do not fail hard
-
-  return true;
-}
-
-static bool smart_pair_try() {
-  printStamp();
-  Serial.println("==== SMART PAIR TRY START ====");
-
-  // replay the whole sequence, but intelligently:
-  // reads for pointer writes, skip captured 0x50 blocks
-  if (!run_full_sequence_from_file()) {
-    printStamp();
-    Serial.println("smart pair: full sequence failed");
-    return false;
-  }
-
-  delay(20);
-
-  // reinforce the pairing/keepalive flow
-  if (!send_10_85_wake()) {
-    printStamp();
-    Serial.println("smart pair: wake phase failed");
-    return false;
-  }
-
-  delay(20);
-
-  // poll snapshot
-  poll_once(true);
-
-  bool linkHigh = digitalRead(GPIO1_ASIC_LINK);
-  printStamp();
-  Serial.print("==== SMART PAIR TRY END, LINK=");
-  Serial.println(linkHigh ? "HIGH" : "LOW");
-
-  return linkHigh;
-}
-
-static bool smart_pair_until_link(uint8_t tries) {
-  for (uint8_t i = 0; i < tries; i++) {
-    printStamp();
-    Serial.print("PAIR ATTEMPT ");
-    Serial.print(i + 1);
-    Serial.print("/");
-    Serial.println(tries);
-
-    if (smart_pair_try()) {
-      linkedOnce = true;
-      return true;
+    if (useLeftOnly) {
+      M = L;
+    } else if (useRightOnly) {
+      M = R;
+    } else if (averageLR) {
+      M = sat_add32(L >> 1, R >> 1);
+    } else {
+      M = L;
     }
 
-    delay(150);
+    if (outputShift > 0) {
+      M >>= outputShift;
+    }
+
+    out[i] = M;
   }
 
-  return false;
-}
-
-// ============================================================
-// SERIAL COMMANDS
-// ============================================================
-static void print_help() {
-  Serial.println();
-  Serial.println("Commands:");
-  Serial.println("  pair      -> run smart pairing");
-  Serial.println("  seq       -> run full sniff sequence");
-  Serial.println("  wake      -> send smart wake / keepalive");
-  Serial.println("  poll      -> one full poll snapshot");
-  Serial.println("  burst     -> burst poll");
-  Serial.println("  reset     -> pulse RESN");
-  Serial.println("  keep on   -> enable auto keepalive");
-  Serial.println("  keep off  -> disable auto keepalive");
-  Serial.println("  help      -> show help");
-  Serial.println();
-}
-
-static void handle_serial_command(String cmd) {
-  cmd.trim();
-  cmd.toLowerCase();
-
-  if (cmd == "pair") {
-    bool ok = smart_pair_until_link(3);
-    printStamp();
-    Serial.println(ok ? "PAIR OK" : "PAIR FAIL");
-  }
-  else if (cmd == "seq") {
-    bool ok = run_full_sequence_from_file();
-    printStamp();
-    Serial.println(ok ? "SEQ OK" : "SEQ FAIL");
-  }
-  else if (cmd == "wake") {
-    bool ok = send_10_85_wake();
-    printStamp();
-    Serial.println(ok ? "WAKE OK" : "WAKE FAIL");
-  }
-  else if (cmd == "poll") {
-    poll_once(true);
-  }
-  else if (cmd == "burst") {
-    poll_burst(BURST_POLLS, BURST_DELAY_MS);
-  }
-  else if (cmd == "reset") {
-    ezw_reset_pulse();
-    printStamp();
-    Serial.println("RESET DONE");
-  }
-  else if (cmd == "keep on") {
-    autoKeepAlive = true;
-    printStamp();
-    Serial.println("AUTO KEEPALIVE ON");
-  }
-  else if (cmd == "keep off") {
-    autoKeepAlive = false;
-    printStamp();
-    Serial.println("AUTO KEEPALIVE OFF");
-  }
-  else if (cmd == "help" || cmd.length() == 0) {
-    print_help();
-  }
-  else {
-    printStamp();
-    Serial.print("UNKNOWN CMD: ");
-    Serial.println(cmd);
-    print_help();
-  }
+  return frames;
 }
 
 // ============================================================
 // SETUP
 // ============================================================
+
 void setup() {
   Serial.begin(115200);
-  delay(300);
-
-  i2s_start_mclk_12288k();
-  delay(100);
-
-  pinMode(PIN_RESN, OUTPUT);
-  digitalWrite(PIN_RESN, HIGH);
-
-  pinMode(GPIO1_ASIC_LINK, INPUT);
-  pinMode(GPIO2_ASIC_INT, INPUT);
-
-  ezw_reset_pulse();
-  delay(100);
-
-  Wire.begin(I2C_SDA, I2C_SCL, I2C_HZ);
-  Wire.setClock(I2C_HZ);
+  delay(500);
 
   Serial.println();
-  Serial.println("======================================");
-  Serial.println("ESP32 Sony S-AIR smart pairing start");
-  Serial.println("======================================");
+  Serial.println("=====================================");
+  Serial.println("ESP32 Sony I2S -> TAS5749M converter");
+  Serial.println("=====================================");
 
-  Serial.println("Ping 0x40 / 0x41");
-  Wire.beginTransmission(ADDR_40);
-  Serial.print("Ping 0x40 rc="); Serial.println(Wire.endTransmission());
-  Wire.beginTransmission(ADDR_41);
-  Serial.print("Ping 0x41 rc="); Serial.println(Wire.endTransmission());
+  Wire.begin(SDA_PIN, SCL_PIN);
+  delay(20);
 
-  print_link_status();
-  print_int_status();
-
-  Serial.println("---- FIRST SMART PAIR ----");
-  bool ok = smart_pair_until_link(3);
-  Serial.println(ok ? "FIRST PAIR OK" : "FIRST PAIR FAIL");
-
+  // TAS5749M init from your uploaded header
+  TAS5749_I2C_INT();
   delay(50);
 
-  print_link_status();
-  print_int_status();
+  init_sony_rx();
+  init_tas_tx();
 
-  Serial.println("---- FIRST POLL SNAPSHOT ----");
-  poll_once(true);
+  print_i2s_rates();
 
-  print_help();
+  Serial.println("Converter started.");
+  Serial.println("If silent, try:");
+  Serial.println("  1) useLeftOnly=true");
+  Serial.println("  2) useRightOnly=true");
+  Serial.println("  3) averageLR=true");
+  Serial.println("  4) change communication format to left-justified test");
 }
 
 // ============================================================
 // LOOP
 // ============================================================
+
 void loop() {
-  static uint32_t lastPollMs = 0;
-  static int lastLink = -1;
-  static int lastInt  = -1;
-  static String rxLine;
+  size_t bytesRead = 0;
+  size_t bytesWritten = 0;
 
-  const uint32_t now = millis();
+  // Read stereo 32-bit data from Sony
+  esp_err_t erx = i2s_read(
+    I2S_SONY_RX,
+    (void*)rxBuf,
+    sizeof(rxBuf),
+    &bytesRead,
+    portMAX_DELAY
+  );
 
-  // periodic polling
-  if (now - lastPollMs >= POLL_PERIOD_MS) {
-    lastPollMs = now;
-    poll_once(false);
+  if (erx != ESP_OK || bytesRead == 0) {
+    Serial.printf("RX fail erx=%d bytes=%u\n", (int)erx, (unsigned)bytesRead);
+    delay(10);
+    return;
   }
 
-  // monitor LINK / INT
-  int linkNow = digitalRead(GPIO1_ASIC_LINK);
-  int intNow  = digitalRead(GPIO2_ASIC_INT);
+  size_t inWords = bytesRead / sizeof(int32_t);
+  size_t monoSamples = stereo32_to_mono32(rxBuf, inWords, txBuf);
 
-  if (lastLink == -1) lastLink = linkNow;
-  if (lastInt  == -1) lastInt  = intNow;
+  // Write mono 32-bit data to TAS side
+  esp_err_t etx = i2s_write(
+    I2S_TAS_TX,
+    (const void*)txBuf,
+    monoSamples * sizeof(int32_t),
+    &bytesWritten,
+    portMAX_DELAY
+  );
 
-  if (linkNow != lastLink) {
-    lastLink = linkNow;
-    printStamp();
-    Serial.print("LINK changed -> ");
-    Serial.println(linkNow ? "HIGH (linked)" : "LOW (not linked)");
-    if (linkNow) linkedOnce = true;
-    poll_once(true);
+  if (etx != ESP_OK) {
+    Serial.printf("TX fail etx=%d\n", (int)etx);
+    delay(10);
+    return;
   }
-
-  if (intNow != lastInt) {
-    lastInt = intNow;
-    printStamp();
-    Serial.print("INT changed -> ");
-    Serial.println(intNow ? "HIGH" : "LOW");
-    poll_burst(BURST_POLLS, BURST_DELAY_MS);
-  }
-
-  // auto keepalive
-  if (autoKeepAlive && (now - lastKeepAliveMs >= KEEPALIVE_MS)) {
-    send_10_85_wake();
-    lastKeepAliveMs = now;
-  }
-
-  // auto repair if not linked
-  if (!digitalRead(GPIO1_ASIC_LINK) && (now - lastRepairMs >= REPAIR_INTERVALMS)) {
-    lastRepairMs = now;
-    printStamp();
-    Serial.println("AUTO REPAIR: LINK LOW -> retry smart pair");
-    smart_pair_until_link(1);
-  }
-
-  // serial commands
-  while (Serial.available()) {
-    char c = (char)Serial.read();
-
-    if (c == '\r') continue;
-
-    if (c == '\n') {
-      handle_serial_command(rxLine);
-      rxLine = "";
-    } else {
-      rxLine += c;
-      if (rxLine.length() > 100) rxLine.remove(0, rxLine.length() - 100);
-    }
-  }
-
-  delay(1);
-}
+} 
